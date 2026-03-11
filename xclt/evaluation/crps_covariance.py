@@ -1,0 +1,226 @@
+import numpy as np
+
+def _crps_ea_Xy_eb_Xy(Xa, ya, Xb, yb):
+    """
+    Unbiased estimate of:
+    E|Xa - ya| * E|Xb' - yb|
+    """
+    N = len(Xa)
+    result = 0.0
+    product = np.abs(Xa[:, None] - ya) * np.abs(Xb[None, :] - yb)  # i, j
+    i, j = np.diag_indices(N)
+    product[i, j] = 0
+    result = product.sum()
+    return result / (N * (N - 1))
+
+
+def _crps_ea_XX_eb_XX(Xa, ya, Xb, yb):
+    """
+    Unbiased estimate of:
+    E|Xa - Xa'| * E|Xb'' - Xb'''|
+    """
+    N = len(Xa)
+
+    # We want to compute:
+    # sum_i≠j≠k≠l |Xa_i - Xa_j| |Xb_k - Xb_l|
+    # Instead of doing a sum over i, j, k, l all differents,
+    # we take the sum over all i, j, k, l (which is the product between a sum over i, j and a sum over k, l),
+    # then substract the collisions, ignoring those between i and j and those between k and l, since those
+    # automatically gives zero.
+
+    sum_ea_XX = np.abs(Xa[:, None] - Xa[None, :]).sum()
+    sum_eb_XX = np.abs(Xb[:, None] - Xb[None, :]).sum()
+
+    # Single conflicts: either i=k, i=l, j=k, or j=l
+    # By symmetry, we are left with: 4 sum_i≠j≠k |Xa_i - Xa_j| |Xb_i - Xb_k|
+    left = np.abs(Xa[:, None, None] - Xa[None, :, None])  # i, j, k
+    right = np.abs(Xb[:, None, None] - Xb[None, None, :])  # i, j, k
+    product = left * right
+    j, k = np.diag_indices(N)
+    product[:, j, k] = 0
+    sum_single_conflict = product.sum()
+
+    # Double conflicts: either i=k and j=l, or i=l and j=k
+    # By symmetry, we are left with: 2 sum_i≠j |Xa_i - Xa_j| |Xb_i - Xb_j|
+    left = np.abs(Xa[:, None] - Xa[None, :])  # i, j
+    right = np.abs(Xb[:, None] - Xb[None, :])  # i, j
+    product = left * right
+    sum_double_conflict = product.sum()
+
+    result = sum_ea_XX * sum_eb_XX - 4 * sum_single_conflict - 2 * sum_double_conflict
+    return result / (N * (N - 1) * (N - 2) * (N - 3))
+
+
+def _crps_ea_Xy_eb_XX(Xa, ya, Xb, yb):
+    """
+    Unbiased estimate of:
+    E|Xa - ya| * E|Xb' - Xb''|
+    """
+    N = len(Xa)
+
+    left = np.abs(Xa[:, None, None] - ya)  # i, j, k
+    right = np.abs(Xb[None, :, None] - Xb[None, None, :])  # i, j, k
+    product = left * right
+    i, j = np.diag_indices(N)
+    product[i, j, :] = 0
+    i, k = np.diag_indices(N)
+    product[i, :, k] = 0
+    result = product.sum()
+    return result / (N * (N - 1) * (N - 2))
+
+
+def _crps_f_Xy(Xa, ya, Xb, yb):
+    """
+    Unbiased estimate of:
+    E(|Xa - ya| * |Xb - yb|)
+    """
+    N = len(Xa)
+    product = np.abs(Xa - ya) * np.abs(Xb - yb)  # i
+    result = product.sum()
+    return result / N
+
+
+def _crps_f_XXXy(Xa, ya, Xb, yb):
+    """
+    Unbiased estimate of:
+    E(|Xa - Xa'| * |Xb - yb|)
+    """
+    N = len(Xa)
+    left = np.abs(Xa[:, None] - Xa[None, :])  # i, j
+    right = np.abs(Xb[:, None] - yb)  # i, j
+    product = left * right
+    result = product.sum()
+    return result / (N * (N - 1))
+
+
+def _crps_f_XX(Xa, ya, Xb, yb):
+    """
+    Unbiased estimate of:
+    E(|Xa - Xa'| * |Xb - Xb'|)
+    """
+    N = len(Xa)
+    left = np.abs(Xa[:, None] - Xa[None, :])  # i, j
+    right = np.abs(Xb[:, None] - Xb[None, :])  # i, j
+    product = left * right
+    result = product.sum()
+    return result / (N * (N - 1))
+
+
+def _crps_f_XXXX(Xa, ya, Xb, yb):
+    """
+    Unbiased estimate of:
+    E(|Xa - Xa'| * |Xb - Xb''|)
+    """
+    N = len(Xa)
+    left = np.abs(Xa[:, None, None] - Xa[None, :, None])  # i, j, k
+    right = np.abs(Xb[:, None, None] - Xb[None, None, :])  # i, j, k
+    product = left * right
+    j, k = np.diag_indices(N)
+    product[:, j, k] = 0
+    result = product.sum()
+    return result / (N * (N - 1) * (N - 2))
+
+
+def crps_covariance(
+    Xa: np.array,
+    ya: float,
+    Xb: np.array,
+    yb: float,
+) -> float:
+    """
+    Unbiased estimate of the covariance between the CRPS of two correlated random variables.
+    If Xa == Xb and ya == yb, returns the variance of the CRPS instead.
+
+    Parameters:
+    -----------
+    Xa: np.ndarray
+        Samples from a forecast for the first variable. (n_samples)
+    ya: float
+        The ground-truth value for the first variable.
+    Xb: np.ndarray
+        Samples from a forecast for the second variable. (n_samples)
+    yb: float
+        The ground-truth value for the second variable.
+
+    Returns:
+    --------
+    covariance: float
+        The covariance between the CRPS estimators.
+    """
+    N = len(Xa)
+
+    ea_Xy_eb_Xy = _crps_ea_Xy_eb_Xy(Xa, ya, Xb, yb)
+    ea_Xy_eb_XX = _crps_ea_Xy_eb_XX(Xa, ya, Xb, yb)
+    ea_XX_eb_Xy = _crps_ea_Xy_eb_XX(Xb, yb, Xa, ya)
+    ea_XX_eb_XX = _crps_ea_XX_eb_XX(Xa, ya, Xb, yb)
+
+    f_Xy = _crps_f_Xy(Xa, ya, Xb, yb)
+    f_XXXy = _crps_f_XXXy(Xa, ya, Xb, yb)
+    f_XyXX = _crps_f_XXXy(Xb, yb, Xa, ya)
+    f_XX = _crps_f_XX(Xa, ya, Xb, yb)
+    f_XXXX = _crps_f_XXXX(Xa, ya, Xb, yb)
+
+    return (
+        -(1 / N) * ea_Xy_eb_Xy
+        + (1 / N) * ea_Xy_eb_XX
+        + (1 / N) * ea_XX_eb_Xy
+        - ((2 * N - 3) / (2 * N * (N - 1))) * ea_XX_eb_XX
+        + (1 / N) * f_Xy
+        - (1 / N) * f_XXXy
+        - (1 / N) * f_XyXX
+        + (1 / (2 * N * (N - 1))) * f_XX
+        + ((N - 2) / (N * (N - 1))) * f_XXXX
+    )
+
+
+def weighted_sum_crps_variance(
+    target: np.array,
+    samples: np.array,
+    weights: np.array,
+) -> float:
+    """
+    Unbiased estimator of the variance of the numerical estimate of the
+    given weighted sum of CRPS values.
+
+    This implementation assumes that the univariate is estimated using:
+    CRPS(X, y) ~ (1 / n) * sum_i |x_i - y| - 1 / (2 * n * (n-1)) * sum_i,i' |x_i - x_i'|.
+    This formula gives the same result as the one used in the crps() implementation above.
+
+    Note that this is a heavy computation, being O(k^2 n^3) with k variables and n samples.
+    Also, while it is unbiased, it is not guaranteed to be >= 0.
+
+    Parameters:
+    -----------
+    target: np.ndarray
+        The target values: y in the above formula. (k variables)
+    samples: np.ndarray
+        The forecast values: X in the above formula. (n samples, k variables)
+    weights: np.array
+        The weight given to the CRPS of each variable. (k variables)
+
+    Returns:
+    --------
+    variance: float
+        The variance of the weighted sum of the CRPS estimators.
+    """
+    assert len(target.shape) == 1
+    assert len(samples.shape) == 2
+    assert len(weights.shape) == 1
+    assert target.shape[0] == samples.shape[1] == weights.shape[0]
+
+    s = 0.0
+
+    for i in range(target.shape[0]):
+        for j in range(i, target.shape[0]):
+            Xa = samples[:, i]
+            Xb = samples[:, j]
+            ya = target[i]
+            yb = target[j]
+
+            if i == j:
+                s += weights[i] * weights[j] * crps_covariance(Xa, ya, Xb, yb)
+            else:
+                # Multiply by 2 since we would get the same results by switching i and j
+                s += 2 * weights[i] * weights[j] * crps_covariance(Xa, ya, Xb, yb)
+
+    return s
