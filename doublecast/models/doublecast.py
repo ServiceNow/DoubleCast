@@ -156,53 +156,54 @@ class DoubleCastModel(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        """Load DoubleCastModel from a checkpoint or build from base models"""
+        """Load DoubleCastModel from a local checkpoint or HuggingFace Hub repo.
 
-        # Extract dual-specific parameters from kwargs
-        text_encoder_path = kwargs.pop("text_encoder_path", "google/t5-efficient-large")
-        dual_block_placement = kwargs.pop("dual_block_placement", "all")
-        text_encoder_layer_index = kwargs.pop("text_encoder_layer_index", -2)
-        chronos_path = kwargs.pop("chronos_path", None)
+        - Local path: loads all weights directly from the checkpoint (full load).
+        - HF Hub repo ID: the HF repo only contains the trained delta weights
+          (decoder layer.2 and layer.3). The base model is first initialised from
+          the Chronos and text-encoder weights stored in config.json, then the
+          delta weights are applied on top.
+        """
+
         device = kwargs.pop('device_map', 'cpu')
         torch_dtype = kwargs.pop('torch_dtype', None)
 
-        try:
-            # First, try to load as a saved DoubleCastModel checkpoint
-            checkpoint_path = Path(pretrained_model_name_or_path)
+        # Consume build-from-scratch kwargs — not used when loading a checkpoint
+        kwargs.pop('text_encoder_path', None)
+        kwargs.pop('dual_block_placement', None)
+        kwargs.pop('text_encoder_layer_index', None)
+        kwargs.pop('chronos_path', None)
 
-            if checkpoint_path.is_dir() and (checkpoint_path / "config.json").exists():
-                # Load config from checkpoint
-                config = DoubleCastConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        hf_kwargs = {k: kwargs.pop(k) for k in ('token', 'cache_dir', 'revision', 'local_files_only') if k in kwargs}
 
-                # Create model with config
-                model = cls(config)
+        checkpoint_path = Path(pretrained_model_name_or_path)
+        is_hf_hub = not checkpoint_path.is_dir()
 
-                # Transfer to device and dtype
-                model = model.to(device=device, dtype=torch_dtype)
+        if is_hf_hub:
+            from huggingface_hub import snapshot_download
+            checkpoint_path = Path(snapshot_download(str(pretrained_model_name_or_path), **hf_kwargs))
 
-                # Load state dict
-                state_dict = cls._load_state_dict_from_checkpoint(checkpoint_path, device)
+        config = DoubleCastConfig.from_pretrained(checkpoint_path, **kwargs)
+        model = cls(config)
+        model = model.to(device=device, dtype=torch_dtype)
 
-                # Load the state dict
-                missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        state_dict = cls._load_state_dict_from_checkpoint(checkpoint_path, device)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
 
-                # Handle tied weights manually if they're missing
-                if hasattr(model, '_tie_weights'):
-                    model._tie_weights()
+        if hasattr(model, '_tie_weights'):
+            model._tie_weights()
 
-                logger.info(f"Loaded DoubleCastModel from checkpoint: {pretrained_model_name_or_path}")
-                cls._log_loading_info(missing_keys, unexpected_keys, model._tied_weights_keys)
+        if is_hf_hub:
+            # Delta load — missing frozen weights are expected, only warn on unexpected keys
+            if unexpected_keys:
+                logger.warning(f"Unexpected keys in delta checkpoint: {unexpected_keys[:5]}")
+            logger.info(f"Loaded delta checkpoint from HF Hub '{pretrained_model_name_or_path}' "
+                        f"({len(state_dict)} trained tensors applied on top of base models)")
+        else:
+            cls._log_loading_info(missing_keys, unexpected_keys, model._tied_weights_keys)
+            logger.info(f"Loaded full checkpoint from: {pretrained_model_name_or_path}")
 
-                return model
-
-        except Exception as e:
-            logger.info(f"Could not load as DoubleCastModel checkpoint ({e}), building from base models...")
-
-        # If loading as checkpoint fails, build from base models
-        return cls._build_from_base_models(
-            pretrained_model_name_or_path, text_encoder_path, dual_block_placement,
-            chronos_path, device, torch_dtype, text_encoder_layer_index=text_encoder_layer_index, **kwargs  # Add this parameter
-        )
+        return model
 
     @staticmethod
     def _load_state_dict_from_checkpoint(checkpoint_path: Path, device):
@@ -487,50 +488,70 @@ class DoubleCastPipeline(ChronosPipeline):
         return torch.cat(predictions, dim=-1).to(dtype=torch.float32, device="cpu")
 
     @classmethod
-    def from_pretrained(cls, *args, **kwargs) -> "DoubleCastPipeline":
-        """Create DoubleCastPipeline from pretrained models"""
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs) -> "DoubleCastPipeline":
+        """Create a DoubleCastPipeline from a checkpoint or HuggingFace Hub repo.
 
-        text_encoder_path = kwargs.pop("text_encoder_path", "google/t5-efficient-large")
-        dual_block_placement = kwargs.pop("dual_block_placement", "all")
-        text_encoder_layer_index = kwargs.pop("text_encoder_layer_index", -2)  # Add this line
+        There are two supported calling conventions:
+
+        **New style** — single argument is a DoubleCast checkpoint or HF Hub repo ID.
+        All configuration (text_encoder_path, chronos_path, etc.) is read from config.json:
+
+            pipeline = DoubleCastPipeline.from_pretrained("your-org/doublecast")
+
+        **Legacy style** — first argument is the base Chronos model; a separate
+        ``checkpoint_path`` kwarg points to the DoubleCast checkpoint (used by
+        training scripts that build or resume from a run directory):
+
+            pipeline = DoubleCastPipeline.from_pretrained(
+                "amazon/chronos-t5-large",
+                text_encoder_path="Qwen/Qwen3-14B",
+                checkpoint_path="/path/to/checkpoint",
+            )
+        """
         checkpoint_path = kwargs.pop("checkpoint_path", None)
-        chronos_path = args[0] if args else "amazon/chronos-t5-large"
 
         if checkpoint_path is not None:
-            dual_model = DoubleCastModel.from_pretrained(
-                checkpoint_path,
-                text_encoder_path=text_encoder_path,
-                dual_block_placement=dual_block_placement,
-                text_encoder_layer_index=text_encoder_layer_index,
-                chronos_path=chronos_path,
-                **kwargs
-            )
-            dual_config = dual_model.config
+            # Legacy style: chronos base model + separate checkpoint path
+            dual_model = DoubleCastModel.from_pretrained(checkpoint_path, **kwargs)
         else:
-            text_encoder_config = AutoConfig.from_pretrained(text_encoder_path, **kwargs)
-            cross_attention_model_size = (
-                text_encoder_config.d_model if hasattr(text_encoder_config, 'd_model')
-                else text_encoder_config.hidden_size
-            )
+            # New style: single arg is the DoubleCast checkpoint / HF Hub repo
+            text_encoder_path = kwargs.pop("text_encoder_path", None)
+            dual_block_placement = kwargs.pop("dual_block_placement", None)
+            text_encoder_layer_index = kwargs.pop("text_encoder_layer_index", None)
 
-            base_config = AutoConfig.from_pretrained(*args, **kwargs)
-            config_dict = base_config.to_dict()
-            config_dict.update({
-                'text_encoder_path': text_encoder_path,
-                'cross_attention_model_size': cross_attention_model_size,
-                'dual_block_placement': dual_block_placement,
-                'text_encoder_layer_index': text_encoder_layer_index,
-                'chronos_path': chronos_path,
-                'chronos_config': config_dict.get('chronos_config', {}),
-            })
+            if text_encoder_path or dual_block_placement or text_encoder_layer_index:
+                # Build a fresh model from base components (training from scratch)
+                chronos_path = pretrained_model_name_or_path
+                text_encoder_path = text_encoder_path or "google/t5-efficient-large"
+                dual_block_placement = dual_block_placement or "all"
+                text_encoder_layer_index = text_encoder_layer_index if text_encoder_layer_index is not None else -2
 
-            dual_config = DoubleCastConfig(**config_dict)
-            dual_model = DoubleCastModel(config=dual_config)
+                device = kwargs.pop('device_map', 'cpu')
+                torch_dtype = kwargs.pop('torch_dtype', None)
 
-            device = kwargs.get('device_map', 'cpu')
-            torch_dtype = kwargs.get('torch_dtype', None)
-            dual_model = dual_model.to(device=device, dtype=torch_dtype)
+                text_encoder_config = AutoConfig.from_pretrained(text_encoder_path)
+                cross_attention_model_size = (
+                    text_encoder_config.d_model if hasattr(text_encoder_config, 'd_model')
+                    else text_encoder_config.hidden_size
+                )
+                base_config = AutoConfig.from_pretrained(chronos_path)
+                config_dict = base_config.to_dict()
+                config_dict.update({
+                    'text_encoder_path': text_encoder_path,
+                    'cross_attention_model_size': cross_attention_model_size,
+                    'dual_block_placement': dual_block_placement,
+                    'text_encoder_layer_index': text_encoder_layer_index,
+                    'chronos_path': chronos_path,
+                    'chronos_config': config_dict.get('chronos_config', {}),
+                })
+                dual_config = DoubleCastConfig(**config_dict)
+                dual_model = DoubleCastModel(config=dual_config)
+                dual_model = dual_model.to(device=device, dtype=torch_dtype)
+            else:
+                # Load from DoubleCast checkpoint or HF Hub repo
+                dual_model = DoubleCastModel.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
+        dual_config = dual_model.config
         chronos_config = ChronosConfig(**dual_config.chronos_config)
         tokenizer = chronos_config.create_tokenizer()
         text_tokenizer = AutoTokenizer.from_pretrained(dual_config.text_encoder_path)
