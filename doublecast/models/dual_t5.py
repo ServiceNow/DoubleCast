@@ -1,4 +1,4 @@
-# Code taken from transformers.models.t5.modeling_t5
+# Code adapted from transformers.models.t5.modeling_t5
 
 # coding=utf-8
 # Copyright 2018 Mesh TensorFlow authors, T5 Authors and HuggingFace Inc. team.
@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch T5 model."""
+"""Adaptation of the PyTorch T5 model to add a second cross attention to the decoder."""
 
 import copy
 import math
