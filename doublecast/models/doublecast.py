@@ -20,19 +20,19 @@ import chronos
 from chronos import ChronosConfig, ChronosTokenizer, ChronosPipeline
 from chronos.base import ForecastType
 
-from xclt.models.dual_t5 import DualT5ForConditionalGeneration
+from doublecast.models.dual_t5 import DualT5ForConditionalGeneration
 
 logger = logging.getLogger(__file__)
 
 
-class DualChronosConfig(T5Config):
+class DoubleCastConfig(T5Config):
     """
-    Configuration class for DualChronosModel.
+    Configuration class for DoubleCastModel.
 
     This configuration class stores configuration for a dual model that combines
     a T5-based time series model with a text encoder for context-aware forecasting.
     """
-    model_type = "dual_chronos"
+    model_type = "double_cast"
 
     def __init__(
         self,
@@ -85,9 +85,9 @@ class DualChronosConfig(T5Config):
         return output
 
 
-class DualChronosModel(PreTrainedModel):
+class DoubleCastModel(PreTrainedModel):
     """
-    DualChronosModel combines a T5-based time series forecasting model with a text encoder
+    DoubleCastModel combines a T5-based time series forecasting model with a text encoder
     for context-aware time series forecasting.
 
     The model consists of:
@@ -95,8 +95,8 @@ class DualChronosModel(PreTrainedModel):
     - A text encoder (self.text_encoder) for processing textual context
     """
 
-    config_class = DualChronosConfig
-    base_model_prefix = "dual_chronos"
+    config_class = DoubleCastConfig
+    base_model_prefix = "double_cast"
 
     # Tied weights - these should match the actual model structure
     _tied_weights_keys = [
@@ -110,7 +110,7 @@ class DualChronosModel(PreTrainedModel):
         "model.decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight",
     ]
 
-    def __init__(self, config: DualChronosConfig):
+    def __init__(self, config: DoubleCastConfig):
         super().__init__(config)
 
         self.model = DualT5ForConditionalGeneration(config=config)
@@ -156,7 +156,7 @@ class DualChronosModel(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
-        """Load DualChronosModel from a checkpoint or build from base models"""
+        """Load DoubleCastModel from a checkpoint or build from base models"""
 
         # Extract dual-specific parameters from kwargs
         text_encoder_path = kwargs.pop("text_encoder_path", "google/t5-efficient-large")
@@ -167,12 +167,12 @@ class DualChronosModel(PreTrainedModel):
         torch_dtype = kwargs.pop('torch_dtype', None)
 
         try:
-            # First, try to load as a saved DualChronosModel checkpoint
+            # First, try to load as a saved DoubleCastModel checkpoint
             checkpoint_path = Path(pretrained_model_name_or_path)
 
             if checkpoint_path.is_dir() and (checkpoint_path / "config.json").exists():
                 # Load config from checkpoint
-                config = DualChronosConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+                config = DoubleCastConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
                 # Create model with config
                 model = cls(config)
@@ -190,13 +190,13 @@ class DualChronosModel(PreTrainedModel):
                 if hasattr(model, '_tie_weights'):
                     model._tie_weights()
 
-                logger.info(f"Loaded DualChronosModel from checkpoint: {pretrained_model_name_or_path}")
+                logger.info(f"Loaded DoubleCastModel from checkpoint: {pretrained_model_name_or_path}")
                 cls._log_loading_info(missing_keys, unexpected_keys, model._tied_weights_keys)
 
                 return model
 
         except Exception as e:
-            logger.info(f"Could not load as DualChronosModel checkpoint ({e}), building from base models...")
+            logger.info(f"Could not load as DoubleCastModel checkpoint ({e}), building from base models...")
 
         # If loading as checkpoint fails, build from base models
         return cls._build_from_base_models(
@@ -297,8 +297,8 @@ class DualChronosModel(PreTrainedModel):
             'chronos_config': config_dict.get('chronos_config', {}),
         })
 
-        # Create DualChronosConfig
-        dual_config = DualChronosConfig(**config_dict)
+        # Create DoubleCastConfig
+        dual_config = DoubleCastConfig(**config_dict)
 
         # Create model
         model = cls(dual_config)
@@ -306,7 +306,7 @@ class DualChronosModel(PreTrainedModel):
         # Transfer to device and dtype
         model = model.to(device=device, dtype=torch_dtype)
 
-        logger.info(f"Built DualChronosModel from base models")
+        logger.info(f"Built DoubleCastModel from base models")
         return model
 
     def forward(
@@ -384,12 +384,12 @@ class DualChronosModel(PreTrainedModel):
             return preds.reshape(input_ids.size(0), num_samples, -1)
 
 
-class DualChronosPipeline(ChronosPipeline):
-    """Pipeline for DualChronosModel that handles both numerical and textual inputs"""
+class DoubleCastPipeline(ChronosPipeline):
+    """Pipeline for DoubleCastModel that handles both numerical and textual inputs"""
 
     tokenizer: ChronosTokenizer
     text_tokenizer: AutoTokenizer
-    model: DualChronosModel
+    model: DoubleCastModel
     forecast_type: ForecastType = ForecastType.SAMPLES
 
     def __init__(self, tokenizer, text_tokenizer, model):
@@ -487,8 +487,8 @@ class DualChronosPipeline(ChronosPipeline):
         return torch.cat(predictions, dim=-1).to(dtype=torch.float32, device="cpu")
 
     @classmethod
-    def from_pretrained(cls, *args, **kwargs) -> "DualChronosPipeline":
-        """Create DualChronosPipeline from pretrained models"""
+    def from_pretrained(cls, *args, **kwargs) -> "DoubleCastPipeline":
+        """Create DoubleCastPipeline from pretrained models"""
 
         text_encoder_path = kwargs.pop("text_encoder_path", "google/t5-efficient-large")
         dual_block_placement = kwargs.pop("dual_block_placement", "all")
@@ -497,7 +497,7 @@ class DualChronosPipeline(ChronosPipeline):
         chronos_path = args[0] if args else "amazon/chronos-t5-large"
 
         if checkpoint_path is not None:
-            dual_model = DualChronosModel.from_pretrained(
+            dual_model = DoubleCastModel.from_pretrained(
                 checkpoint_path,
                 text_encoder_path=text_encoder_path,
                 dual_block_placement=dual_block_placement,
@@ -524,8 +524,8 @@ class DualChronosPipeline(ChronosPipeline):
                 'chronos_config': config_dict.get('chronos_config', {}),
             })
 
-            dual_config = DualChronosConfig(**config_dict)
-            dual_model = DualChronosModel(config=dual_config)
+            dual_config = DoubleCastConfig(**config_dict)
+            dual_model = DoubleCastModel(config=dual_config)
 
             device = kwargs.get('device_map', 'cpu')
             torch_dtype = kwargs.get('torch_dtype', None)

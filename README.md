@@ -1,2 +1,2 @@
-# research-xc-llm-time
+# DoubleCast
 Model with cross-attention between a LLM and Time Series model

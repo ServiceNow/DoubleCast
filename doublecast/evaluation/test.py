@@ -15,9 +15,9 @@ from datasets import load_dataset, load_from_disk
 from transformers import TrainingArguments, set_seed
 
 from chronos import ChronosPipeline
-from xclt.evaluation.metrics import compute_metrics
-from xclt.models.dualchronos import DualChronosPipeline
-from xclt.models.utils import (
+from doublecast.evaluation.metrics import compute_metrics
+from doublecast.models.doublecast import DoubleCastPipeline
+from doublecast.models.utils import (
     CustomTrainer,
     dual_text_timeseries_collator,
     extract_future_from_response,
@@ -157,7 +157,7 @@ def process_checkpoint(checkpoint_path, checkpoint_type, chronos_pipeline, datas
     logger.info(f"Processing {checkpoint_type} checkpoint from {checkpoint_path}...")
 
     # Load checkpoint pipeline
-    pipeline = DualChronosPipeline.from_pretrained(
+    pipeline = DoubleCastPipeline.from_pretrained(
         args.chronos_path,
         text_encoder_path=args.text_encoder_path,
         dual_block_placement=args.dual_block_placement,

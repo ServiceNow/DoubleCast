@@ -15,7 +15,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["WANDB_PROJECT"] = "Context-aided forecasting"
 
 import torch
-from torch import nn
 import wandb
 from accelerate import Accelerator
 from datasets import (
@@ -23,148 +22,29 @@ from datasets import (
     load_dataset,
     load_from_disk,
 )
-from transformers import (
-    TrainingArguments,
-    set_seed,
-)
-from transformers.trainer_utils import get_last_checkpoint
+from transformers import TrainingArguments, set_seed
 
-from xclt.evaluation.metrics import compute_metrics
-from xclt.models.dual_t5 import DualT5DecoderBlock
-from xclt.models.dualchronos import DualChronosPipeline
-from xclt.models.utils import (
-    is_valid,
+from doublecast.evaluation.metrics import compute_metrics
+from doublecast.models.dual_t5 import DualT5DecoderBlock
+from doublecast.models.doublecast import DoubleCastPipeline
+from doublecast.models.utils import (
     AttentionRatioCallback,
-    StagedCustomTrainer,
+    CustomTrainer,
     dual_text_timeseries_collator,
     format_params,
+    is_valid,
 )
 
 set_seed(42)
 accelerator = Accelerator()
 wandb.login()
 
-# Enable TF32 on Hopper for faster matmuls (does not affect bf16)
-torch.set_float32_matmul_precision("high")
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
-# Logging setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-
-STAGE_CFG = {
-    "1": {
-        "desc": "Adapters only",
-        "unfreeze_last_n_blocks": 0,
-        "unfreeze_text_last_n": 0,
-        "learning_rate": 1e-4,
-        "ffn_lr_multiplier": 0.01,
-        "text_lr_multiplier": 0.0,
-        "warmup_ratio": 0.005,
-    },
-    "2": {
-        "desc": "Progressive unfreeze",
-        "unfreeze_last_n_blocks": 2,
-        "unfreeze_text_last_n": 0,
-        "learning_rate": 8e-5,
-        "ffn_lr_multiplier": 1.0,
-        "text_lr_multiplier": 0.0,
-        "warmup_ratio": 0.005,
-    },
-    "3": {
-        "desc": "Fine polish",
-        "unfreeze_last_n_blocks": 2,
-        "unfreeze_text_last_n": 4,
-        "learning_rate": 5e-5,
-        "ffn_lr_multiplier": 1.0,
-        "text_lr_multiplier": 0.5,
-        "warmup_ratio": 0.005,
-    },
-}
-
-def freeze_and_unfreeze(model: torch.nn.Module, last_n_backbone: int, last_n_text: int):
-    # Freeze everything
-    for p in model.parameters():
-        p.requires_grad = False
-
-    # Always unfreeze dual cross-attn + LN + FFN in DualT5DecoderBlock
-    for block in model.model.decoder.block:
-        if isinstance(block, DualT5DecoderBlock):
-            for p in block.layer[2].EncDecAttention.parameters():
-                p.requires_grad = True
-            for p in block.layer[2].layer_norm.parameters():
-                p.requires_grad = True
-            for p in block.layer[3].parameters():
-                p.requires_grad = True
-
-    # Progressive unfreeze backbone: interpret -1 as "all decoder blocks"
-    dec_blocks = list(model.model.decoder.block)
-    if last_n_backbone is not None:
-        if last_n_backbone == -1:
-            n_backbone = len(dec_blocks)
-        else:
-            n_backbone = max(0, min(last_n_backbone, len(dec_blocks)))
-        if n_backbone > 0:
-            for layer in dec_blocks[-n_backbone:]:
-                for p in layer.parameters():
-                    p.requires_grad = True
-
-    # Progressive unfreeze: last N layers of text encoder (by name pattern)
-    def _unfreeze_text_last_n_by_name(m: nn.Module, last_n: int):
-        if last_n is None or last_n == 0:
-            return []
-        layer_regex = re.compile(r"text_encoder.*layers\.(\d+)\.")
-        layer_ids = set()
-        for n, _ in m.named_parameters():
-            match = layer_regex.search(n)
-            if match:
-                layer_ids.add(int(match.group(1)))
-
-        # If -1: unfreeze all text encoder params
-        if last_n == -1:
-            for n, p in m.named_parameters():
-                if "text_encoder" in n:
-                    p.requires_grad = True
-            return ["all"]
-
-        unfrozen_layers = []
-        if layer_ids:
-            sorted_ids = sorted(layer_ids)
-            target = set(sorted_ids[-last_n:])
-            for n, p in m.named_parameters():
-                match = layer_regex.search(n)
-                if match and int(match.group(1)) in target:
-                    p.requires_grad = True
-            unfrozen_layers = sorted(list(target))
-            # also unfreeze common final norms if present
-            for n, p in m.named_parameters():
-                if "text_encoder" in n and any(k in n for k in [".ln_f", ".final_layernorm"]) and "layers" not in n:
-                    p.requires_grad = True
-        else:
-            # Fallback: unfreeze all text encoder params if we can't find layer indices
-            for n, p in m.named_parameters():
-                if "text_encoder" in n:
-                    p.requires_grad = True
-            unfrozen_layers = ["all"]
-        return unfrozen_layers
-
-    unfrozen_te = _unfreeze_text_last_n_by_name(model, last_n_text)
-    return unfrozen_te
-
-def apply_stage_defaults(args, stage_cfg):
-    if args.learning_rate is None:
-        args.learning_rate = stage_cfg["learning_rate"]
-    if args.warmup_ratio is None:
-        args.warmup_ratio = stage_cfg["warmup_ratio"]
-    if args.ffn_lr_multiplier is None:
-        args.ffn_lr_multiplier = stage_cfg["ffn_lr_multiplier"]
-    if args.text_lr_multiplier is None:
-        args.text_lr_multiplier = stage_cfg["text_lr_multiplier"]
 
 def main():
     parser = argparse.ArgumentParser()
@@ -235,26 +115,8 @@ def main():
                 help="Number of updates steps to accumulate before performing a backward/update pass")
     parser.add_argument("--dataloader_num_workers", type=int, default=4,
                 help="Number of subprocesses to use for data loading")
-    parser.add_argument("--ffn_lr_multiplier", type=float, default=None,
-                help="Learning rate multiplier for dual-block FFN params (None => stage default)")
-    parser.add_argument("--stage", choices=["1", "2", "3"], default="1",
-                help="Training stage: 1=Adapters only, 2=Progressive unfreeze, 3=Polish")
-    parser.add_argument("--unfreeze_last_n_blocks", type=int, default=None,
-                help="Override stage default for number of decoder blocks to unfreeze (from the end)")
-    parser.add_argument("--unfreeze_text_last_n", type=int, default=None,
-                help="Override stage default for number of text-encoder layers to unfreeze (from the end)")
-    parser.add_argument("--text_lr_multiplier", type=float, default=None,
-                help="LR multiplier applied to text encoder params (None => stage default)")
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
-                help="Path to a specific checkpoint folder to resume training from")
-    parser.add_argument("--disable_wandb", action="store_true",
-                help="Disable Weights & Biases logging")
-    parser.add_argument("--use_fsdp", action="store_true",
-                help="Enable FSDP full_shard auto_wrap.")
-    parser.add_argument("--fsdp_min_params", type=int, default=5_000_000,
-                help="Min params per layer for auto wrap.")
-    parser.add_argument("--deepspeed", type=str, default=None,
-                help="Path to DeepSpeed ZeRO config JSON")
+    parser.add_argument("--ffn_lr_multiplier", type=float, default=0.01,
+                help="Learning rate multiplier for Feed-Forward Network layers in dual blocks (default: 0.01)")
 
     args = parser.parse_args()
 
@@ -265,12 +127,12 @@ def main():
     else:
         dual_block_str = "blocks_" + "_".join(map(str, args.dual_block_placement))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{chronos_size}_{text_encoder_short}_{dual_block_str}_{args.prompt_type}_s{args.stage}_{timestamp}"
+    run_name = f"{chronos_size}_{text_encoder_short}_{dual_block_str}_{args.prompt_type}_{timestamp}"
     output_dir = os.path.join(args.output_dir, run_name)
     logging_dir = os.path.join(output_dir, "logs")
     os.makedirs(output_dir, exist_ok=True)
 
-    dual_pipeline = DualChronosPipeline.from_pretrained(
+    dual_pipeline = DoubleCastPipeline.from_pretrained(
         args.chronos_path,
         text_encoder_path=args.text_encoder_path,
         dual_block_placement=args.dual_block_placement,
@@ -281,12 +143,20 @@ def main():
     )
     model = dual_pipeline.model
 
-    # ---- apply stage config (LRs, warmup, unfreezing) ----
-    stage_cfg = STAGE_CFG[args.stage]
-    apply_stage_defaults(args, stage_cfg)
-    last_n_backbone = args.unfreeze_last_n_blocks if args.unfreeze_last_n_blocks is not None else stage_cfg["unfreeze_last_n_blocks"]
-    last_n_text = args.unfreeze_text_last_n if args.unfreeze_text_last_n is not None else stage_cfg["unfreeze_text_last_n"]
-    unfrozen_te = freeze_and_unfreeze(model, last_n_backbone, last_n_text)
+    for param in model.parameters():
+        param.requires_grad = False
+
+    for block in model.model.decoder.block:
+        if isinstance(block, DualT5DecoderBlock):
+            # Unfreeze the cross-attention submodule parameters.
+            for p in block.layer[2].EncDecAttention.parameters():
+                p.requires_grad = True
+            # Unfreeze the layer norm parameters in that block, if needed.
+            for p in block.layer[2].layer_norm.parameters():
+                p.requires_grad = True
+            # Unfreeze the parameters in the T5LayerFF module.
+            for p in block.layer[3].parameters():
+                p.requires_grad = True
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -388,13 +258,11 @@ def main():
             dataset = load_dataset("json", data_files=val_path)["train"]
         else:
             dataset = load_from_disk(val_path)
+
         val_size_before = len(dataset)
-
         dataset = dataset.filter(partial(is_valid))
-
         val_size_after = len(dataset)
 
-        # Log filtering statistics
         filtered = val_size_before - val_size_after
         logger.info(f"    {filtered}/{val_size_before} examples filtered out ({filtered/val_size_before*100:.2f}%)")
         logger.info(f"    {val_size_after}/{val_size_before} examples kept ({val_size_after/val_size_before*100:.2f}%)")
@@ -414,8 +282,6 @@ def main():
         weight_decay=args.weight_decay,
         optim="adamw_torch_fused",
         max_grad_norm=args.max_grad_norm,
-        bf16=True,
-        bf16_full_eval=True,
         logging_dir=logging_dir,
         logging_strategy="steps",
         logging_steps=args.logging_steps,
@@ -431,7 +297,7 @@ def main():
         eval_steps=args.eval_steps,
         load_best_model_at_end=True,
         greater_is_better=False,
-        metric_for_best_model=f"eval_{dataset_names[0]}_crps",
+        metric_for_best_model=f"eval_{dataset_names[0]}_crps"
     )
 
     data_collator = partial(
@@ -441,7 +307,7 @@ def main():
         prompt=args.prompt_type,
     )
 
-    trainer = StagedCustomTrainer(
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset_train,
@@ -449,43 +315,23 @@ def main():
         data_collator=data_collator,
         compute_metrics=partial(compute_metrics, tokenizer=dual_pipeline.tokenizer),
         ffn_lr_multiplier=args.ffn_lr_multiplier,
-        text_lr_multiplier=args.text_lr_multiplier,  # NEW: separate LR for text encoder params
         callbacks=[AttentionRatioCallback()]
     )
 
-    resume_ckpt = None
-    if args.resume_from_checkpoint:
-        resume_ckpt = args.resume_from_checkpoint
-    else:
-        try:
-            last_ckpt = get_last_checkpoint(output_dir)
-        except Exception as e:
-            last_ckpt = None
-            logger.warning(f"Could not scan for last checkpoint in {output_dir}: {e}")
-        if last_ckpt:
-            resume_ckpt = last_ckpt
-
-    if resume_ckpt:
-        logger.info(f"Resuming Trainer from checkpoint: {resume_ckpt}")
-        trainer.train(resume_from_checkpoint=resume_ckpt)
-    else:
-        logger.info("Starting training from scratch (no Trainer checkpoint resume).")
-        trainer.train()
+    logger.info("Starting training...")
+    trainer.train()
 
     if accelerator.is_main_process:
         try:
-            # Define the final checkpoint folder name
             final_ckpt_name = f"checkpoint-{args.max_steps}"
             final_ckpt_path = os.path.join(output_dir, final_ckpt_name)
             final_target = os.path.join(output_dir, "final-checkpoint")
 
-            # Rename the final checkpoint folder
             if os.path.exists(final_ckpt_path):
                 shutil.move(final_ckpt_path, final_target)
             else:
                 print(f"Final checkpoint folder {final_ckpt_name} does not exist.")
 
-            # Retrieve the best checkpoint from the trainer state
             best_ckpt_path = trainer.state.best_model_checkpoint
             best_target = os.path.join(output_dir, "best-checkpoint")
 
@@ -497,18 +343,15 @@ def main():
             else:
                 print("Best checkpoint does not exist.")
 
-            # Remove all other checkpoint folders
             for folder in os.listdir(output_dir):
                 folder_path = os.path.join(output_dir, folder)
                 if os.path.isdir(folder_path) and re.match(r"checkpoint-\d+", folder):
-                    # Do not remove the renamed best or final checkpoints
                     if os.path.abspath(folder_path) not in [os.path.abspath(final_target), os.path.abspath(best_target)]:
                         shutil.rmtree(folder_path)
 
         except Exception as e:
             print(f"[Rank 0] Post-processing failed: {e}")
 
-    # --- Ensure all ranks wait for Rank 0 to finish ---
     accelerator.wait_for_everyone()
 
 

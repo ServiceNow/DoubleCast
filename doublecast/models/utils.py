@@ -6,8 +6,8 @@ import pandas as pd
 import numpy as np
 from functools import partial
 
-from xclt.models.dual_t5 import DualT5DecoderBlock
-from xclt.data.prompts import PROMPTS
+from doublecast.models.dual_t5 import DualT5DecoderBlock
+from doublecast.data.prompts import PROMPTS
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -515,7 +515,7 @@ def visualize_checkpoint_results(
     Updated to handle both instruction/response format and minimal dataset format.
 
     Args:
-        dual_pipeline: Loaded DualChronosPipeline with checkpoint
+        dual_pipeline: Loaded DoubleCastPipeline with checkpoint
         chronos_pipeline: Baseline ChronosPipeline
         dataset_test: Test dataset to sample from
         sample_indices: List of indices to visualize
@@ -644,9 +644,9 @@ def plot_comparison(
     f_q75 = torch.quantile(forecast_sample, 0.75, dim=0).cpu().numpy()
     f_q90 = torch.quantile(forecast_sample, 0.9, dim=0).cpu().numpy()
 
-    plt.fill_between(future_timestamps, f_q10, f_q90, alpha=0.2, color="#7EC8E3", label="DualChronos (10–90%)")
-    plt.fill_between(future_timestamps, f_q25, f_q75, alpha=0.35, color="#1E90FF", label="DualChronos (25–75%)")
-    plt.plot(future_timestamps, f_q50, label="DualChronos Median", color="#003f5c", linewidth=1.5)
+    plt.fill_between(future_timestamps, f_q10, f_q90, alpha=0.2, color="#7EC8E3", label="DoubleCast (10–90%)")
+    plt.fill_between(future_timestamps, f_q25, f_q75, alpha=0.35, color="#1E90FF", label="DoubleCast (25–75%)")
+    plt.plot(future_timestamps, f_q50, label="DoubleCast Median", color="#003f5c", linewidth=1.5)
 
     # Format x-axis
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d\n%H:%M'))

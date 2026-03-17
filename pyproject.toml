@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xclt"
+name = "doublecast"
 version = "0.1.0"
-description = "DualChronos - Context-aware time series forecasting"
+description = "DoubleCast - Context-aware time series forecasting"
 readme = "README.md"
 requires-python = ">=3.10,<3.12"
 license = {text = "MIT"}
@@ -77,19 +77,19 @@ all = [
 ]
 
 [project.scripts]
-xclt-train = "xclt.training.train:main"
-xclt-train-bolt = "xclt.training.train_bolt:main"
-xclt-train-grpo = "xclt.training.train_grpo:main"
-xclt-train-staged = "xclt.training.train_staged:main"
-xclt-test = "xclt.evaluation.test:main"
+doublecast-train = "doublecast.training.train:main"
+doublecast-train-bolt = "doublecast.training.train_bolt:main"
+doublecast-train-grpo = "doublecast.training.train_grpo:main"
+doublecast-train-staged = "doublecast.training.train_staged:main"
+doublecast-test = "doublecast.evaluation.test:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["xclt*"]
+include = ["doublecast*"]
 exclude = ["tests*", "notebooks*", "scripts*", "*.egg-info"]
 
 [tool.setuptools.package-data]
-xclt = ["py.typed"]
+doublecast = ["py.typed"]
 
 [tool.black]
 line-length = 100
