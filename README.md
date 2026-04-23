@@ -3,6 +3,8 @@ Code for the DoubleCast model architecture for context-aided time series forecas
 
 This model was trained using the [CAF-7M](https://huggingface.co/datasets/ServiceNow/CAF_7M) semi-synthetic dataset, also introduced in the same paper. The trained weighted are available at [HuggingFace](https://huggingface.co/ServiceNow/DoubleCast).
 
+A comparison of forecasts between DoubleCast and Chronos can be seen in the associated [demo](https://vincent-zheng.com/DoubleCast/).
+
 Disclaimer: this code is not compatible with newer versions of the `transformers` library. This version is only known to be compatible with version `4.51.3` of said library.
 
 ## Usage example
